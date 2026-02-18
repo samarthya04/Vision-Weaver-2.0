@@ -10,15 +10,15 @@ model:
   load_model: null
 
 trainer:
-  max_epochs: 190 #
+  max_epochs: 50 #
   max_steps: -1 
   check_val_every_n_epoch: 5 #
   limit_val_batches: 0.25 # Validates on 25% of the validation set to save time
-  log_every_n_steps: 10 #
+  log_every_n_steps: 5 #
   precision: '16-mixed' # Uses mixed-precision for faster throughput on NVIDIA GPUs
   accelerator: 'gpu' #
   devices: 1
-  resume_from_checkpoint: null # Set to path if resuming training
+  resume_from_checkpoint: 'models/checkpoints/SupResDiffGAN_Hybrid-epoch=29-val/LPIPS=0.260.ckpt' # Set to path if resuming training
 
 dataset:
   name: 'celeb' # Uses the CelebA dataset
