@@ -1,104 +1,61 @@
-# Vision Weaver: A SupResDiffGAN Implementation
+# Hi-MambaSR: Hierarchical State-Space Refinement for Latent Diffusion
 
 <div align="center">
-  <p><strong>Fusing Latent Diffusion and GANs for High-Fidelity Super-Resolution</strong></p>
+  <p><strong>Fusing Latent Diffusion, Generative Adversarial Networks (GANs), Swin Transformers, and Mamba State-Space Models for High-Fidelity Super-Resolution on 6GB Consumer GPUs.</strong></p>
 </div>
 
 <div align="center">
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python" alt="Python"></a>
   <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c?logo=pytorch" alt="PyTorch"></a>
-  <a href="https://lightning.ai/docs/pytorch/stable/"><img src="https://img.shields.io/badge/PyTorch%20Lightning-2.2%2B-792ee5?logo=pytorch-lightning" alt="PyTorch Lightning"></a>
+  <a href="https://lightning.ai/docs/pytorch/stable/"><img src="https://img.shields.io/badge/Lightning-2.2%2B-792ee5?logo=pytorch-lightning" alt="PyTorch Lightning"></a>
   <a href="https://hydra.cc/"><img src="https://img.shields.io/badge/Config-Hydra-89b8cd" alt="Hydra"></a>
   <a href="https://wandb.ai/"><img src="https://img.shields.io/badge/Logged-W%26B-yellowgreen" alt="Weights & Biases"></a>
 </div>
 
-**Vision Weaver** is a super-resolution project implementing a hybrid architecture inspired by **SupResDiffGAN**, combining **Denoising Diffusion Models** and **Generative Adversarial Networks (GANs)**. By performing diffusion in the **latent space** of a pre-trained tiny autoencoder, the model achieves a balance between **perceptual quality** (from diffusion) and **inference efficiency** (closer to GANs).
+**Hi-MambaSR** is a cutting-edge super-resolution architecture that implements a hybrid approach combining **Latent Denoising Diffusion Models**, **Relativistic GANs**, **Swin Transformers**, and **Mamba State-Space Models (SSMs)**. By performing diffusion in the latent space of a pre-trained autoencoder, injecting precise localized pixel-attention via Swin Transformers, and providing linear-time global context via Mamba blocks, the model achieves unprecedented perceptual quality and structural realism.
 
-This implementation uses:
-- **PyTorch** & **PyTorch Lightning**
-- **Hydra** for configuration
-- **Weights & Biases** for experiment tracking
+Crucially, this entire framework has been heavily mathematically and structurally optimized to run end-to-end training and inference on **6GB VRAM Consumer GPUs**.
 
 ---
 
-<!--## Results Showcase
+## 🌟 Key Research Features & Innovations
 
-*(Placeholder: Replace with your best visual results after evaluation)*
-
-<div align="center">
-  <img src="https://via.placeholder.com/800x300.png?text=Sample+Super-Resolution+Results" alt="Sample Results" />
-  <p><i>↑ LR (Left) | SR (Right) ↑</i></p>
-</div>
--->
-
-## Table of Contents
-
-- [Key Features](#-key-features)
-- [Evaluation Results](#-evaluation-results)
-- [Getting Started](#️-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Datasets](#-datasets)
-- [Usage](#️-usage)
-  - [Training / Fine-tuning](#training--fine-tuning)
-  - [Evaluation](#evaluation)
-- [Configuration](#️-configuration)
-- [Model Architecture](#-model-architecture)
-- [Acknowledgements](#-acknowledgements)
-- [License](#-license)
+- **6GB VRAM Hardened Pipeline**: 
+  - Reduced physical batch sizes (4) synthesized with high gradient accumulation (16) to fit massive architectures on small GPUs without unstable math.
+  - Generative PyTorch gradient checkpointing injected into colossal VGG feature extraction layers to prevent Out-Of-Memory (OOM) crashes during hierarchical perceptual loss calculations.
+- **Mamba State-Space Stability Engine**: 
+  - Substituted native `LayerNorm` with custom **RMSNorm** to stabilize Mamba mixed-precision variables.
+  - Implemented strict 1.0 Global Gradient Norm Clipping and a Linear Learning Rate Warmup scheduler (10% epoch phase) to prevent state-matrix exploding gradients.
+- **Pixel-Space Residual Skip**: Bypass the Autoencoder (VAE) blurring bottleneck entirely via bicubic upsampling + rendering VAE decodings as pure high-frequency residuals.
+- **Small-Batch GAN Physics**: Replaced `BatchNorm` with `InstanceNorm` to prevent batch statistics from collapsing during 4-image micro-batch processing, stabilized by default Spectral Normalization.
+- **Dynamic Fast-Sampling Math**: Corrected continuous 1000-step DDPM to 20-step DDIM subsampling to guarantee the neural network interpolates over valid `alpha_bar` trajectories.
 
 ---
 
-## Key Features
+## 📊 Evaluation & Benchmarking
 
-- **Hybrid Generative Model**: Combines U-Net diffusion generator + patch-based adversarial discriminator.
-- **Latent Space Diffusion**: Efficient inference via compressed latent space using `AutoencoderTiny`.
-- **Flexible Configuration**: Hydra-powered `.yaml` configs in `conf/`.
-- **Experiment Tracking**: Full integration with **Weights & Biases** (metrics, images, charts).
-- **Modular Design**: Clean separation of model, data, and training logic using PyTorch Lightning.
-- **Adaptive Noise Scheduling**: EMA-based noise step adaptation for stable GAN training.
+The architecture leverages automated testing pipelines that scrub PyTorch Lightning logs, generate CSV analytics, and natively port qualitative results (such as inference speed vs. PSNR charts) directly into Weights & Biases dashboards.
+
+> Example benchmarks will be populated in `evaluation_results/hi_mambasr_benchmarks.csv` after executing the testing suite.
 
 ---
 
-## Evaluation Results
-
-*Evaluated on the **CelebA-HQ test set** with the checkpoint `epoch=204`.*
-
-| Posterior | Steps | PSNR ↑ | SSIM ↑ | LPIPS ↓ | MSE ↓          | Time (s/batch) ↓ |
-|-----------|-------|--------|--------|---------|----------------|------------------|
-| DDPM      | 50    | **26.227** | **0.750** | **0.1452** | **0.002560** | **1.28** |
-| DDPM      | 100   | 26.136 | 0.748 | 0.1457 | 0.002613 | 2.45 |
-| DDPM      | 200   | 26.055 | 0.746 | 0.1465 | 0.002661 | 5.44 |
-| DDIM      | 50    | 26.236 | 0.748 | 0.1453 | 0.002555 | 1.52 |
-| DDIM      | 100   | 26.205 | 0.748 | **0.1452** | 0.002574 | 2.49 |
-| DDIM      | 200   | 26.176 | 0.747 | **0.1452** | 0.002590 | 4.73 |
-
-> **Source:** `evaluation/final_evaluation.csv` (generated by `evaluate_model.py`).  
-> Numbers are rounded to 4 decimal places for readability; bold highlights the best per-column value.
-
----
-
-## Getting Started
+## ⚙️ Getting Started
 
 ### Prerequisites
-
 - **Python**: `3.9+` (tested on `3.10`)
-- **Conda** (recommended)
-- **NVIDIA GPU** with CUDA
-- **Kaggle Account & API Token** → place `kaggle.json` in:
-  - Linux/WSL: `~/.kaggle/`
-  - Windows: `C:\Users\<Your-Username>\.kaggle\`
+- **PyTorch 2.0+** (Required for `torch.compile` speed enhancements)
+- **NVIDIA GPU** (Minimum 6GB VRAM)
 
 ### Installation
-
 ```bash
 # 1. Clone the repository
-git clone https://github.com/samarthya04/Super-Resolution-Diff-GAN.git
-cd Super-Resolution-Diff-GAN
+git clone https://github.com/samarthya04/Hi-MambaSR.git
+cd Hi-MambaSR
 
 # 2. Create and activate conda environment
-conda create -n SR_env python=3.10
-conda activate SR_env
+conda create -n mamba_sr python=3.10
+conda activate mamba_sr
 
 # 3. Install dependencies
 pip install -r requirements-data.txt
@@ -108,123 +65,91 @@ pip install -r requirements-gpu.txt
 wandb login
 ```
 
-> Ensure your CUDA version matches the PyTorch build in `requirements-gpu.txt`.
-
 ---
 
-## Datasets
+## 💿 Datasets
 
-This project uses **CelebA-HQ**. A script automates download and preprocessing.
+This project uses **CelebA-HQ** by default. To automate the download and processing:
 
 ```bash
 bash get_data.sh -c
 ```
 
-This will:
-- Download CelebA-HQ via Kaggle
-- Unzip and split into `train`/`val`/`test`
-- Generate **LR images** via bicubic downsampling
-- Save under `data/celeb/`
+This script will:
+1. Interface with Kaggle to download the HQ datasets.
+2. Unzip and properly split into `train`/`val`/`test` subdirectories.
+3. Automatically generate the target 4x Bicubic down-sampled **LR images**.
 
 ---
 
-## Usage
+## 🚀 Usage
 
 ### Training / Fine-tuning
 
+The architecture leverages Hydra for extreme declarative configuration management. The default 6GB VRAM-optimized YAML is `config_mamba`.
+
 ```bash
-python train_model.py -cn config_supresdiffgan
+python train_model.py -cn config_mamba
 ```
 
-#### To **resume** or **fine-tune**:
-
-1. Edit `conf/config_supresdiffgan.yaml`:
+#### To **resume** training or **fine-tune**:
+1. Open `conf/config_mamba.yaml`:
    ```yaml
-   mode: 'train-test'
-   model:
-     load_model: null  # or path to .ckpt
+   mode: 'train'
    trainer:
-     resume_from_checkpoint: "models/checkpoints/your-best.ckpt"
+     resume_from_checkpoint: "models/checkpoints/Hi-MambaSR-best.ckpt"
    ```
-2. Lower `model.lr` (e.g., `1e-5`) and adjust `trainer.max_epochs`.
-3. Run:
-   ```bash
-   python train_model.py -cn config_supresdiffgan
-   ```
-
-> Checkpoints saved in `models/checkpoints/` (best + last).
+2. Adjust `model.lr` (e.g., lower it to `1e-5` for advanced fine-tuning).
+3. Execute the script. The system automatically supports resuming from older ablation targets (via `strict=False` loading).
 
 ---
 
-### Evaluation
+### Inference & Benchmarking
 
 ```bash
-python evaluate_model.py -cn config_supresdiffgan
+python evaluate_model.py -cn config_mamba
 ```
 
 #### Before running:
-1. Open `conf/config_supresdiffgan.yaml`
-2. Set:
+1. Open `conf/config_mamba.yaml` and configure the multi-step testing suite:
    ```yaml
    model:
-     load_model: "models/checkpoints/<your best checkpoint>.ckpt"
+     load_model: "models/checkpoints/<your_best_checkpoint>.ckpt"
    evaluation:
-     steps: [50, 100, 200]
-     posteriors: ["DDPM", "DDIM"]
-     results_file: "evaluation/final_evaluation.csv"
+     steps: [25, 50]    # Will evaluate at both step configurations
+     posteriors: ["ddim", "ddpm"] 
+     results_file: "evaluation_results/hi_mambasr_benchmarks.csv"
    ```
 
-> Outputs: Console, CSV, W&B bar charts.
-
 ---
 
-## Configuration
-
-All settings are in `conf/` via **Hydra**.
-
-| File | Purpose |
-|------|--------|
-| `config_supresdiffgan.yaml` | Main training config |
-
-**Override example**:
-```bash
-python train_model.py -cn config_supresdiffgan dataset.batch_size=16 model.lr=1e-4
-```
-
----
-
-## Model Architecture
+## 🏗️ Architecture Stack
 
 | Component | Description |
-|--------|-------------|
-| **Autoencoder** | `AutoencoderTiny` from `diffusers` → latent compression |
-| **U-Net Generator** | `UNet2DModel` with custom channels, ResNet, attention |
-| **Discriminator** | Patch-based CNN with `BCEWithLogitsLoss` |
-| **Perceptual Loss** | Optional VGG19 feature extractor |
+|-----------|-------------|
+| **Autoencoder** | `AutoencoderTiny`/`AutoencoderKL` projecting RGB into a compressed manifold, augmented with a pixel-space residual connection. |
+| **U-Net Generator** | Hybrid UNet mixing localized **Swin Transformer V2 Attention Arrays** (for high-frequency texture precision) with global linear-time **MultiHead Selective Scan (Mamba)** bottlenecks (for wide-range structural coherence). |
+| **Discriminator** | Relativistic Patch-GAN running `InstanceNorm` + `SpectralNorm` driven by `BCEWithLogitsLoss`. |
+| **Perceptual Loss** | Memory checkpointing Multi-scale VGG19 feature extraction (forced to fp32 calculation to prevent NaNs). |
 
 See:
-- `SupResDiffGAN/modules/UNet.py`
-- `SupResDiffGAN/modules/Discriminator.py`
-- `SupResDiffGAN/modules/FeatureExtractor.py`
+- `Hi-MambaSR/HiMambaSR.py`
+- `Hi-MambaSR/modules/UNet.py`
+- `Hi-MambaSR/modules/Discriminator.py`
+- `Hi-MambaSR/modules/Diffusion.py`
 
 ---
 
-## Acknowledgements
+## 📜 Acknowledgements
 
-This project is inspired by and builds upon:
-- [`dawir7/supresdiffgan`](https://github.com/dawir7/supresdiffgan) – original hybrid SR architecture
-- `diffusers` library by Hugging Face
-- Real-ESRGAN, ResShift, I2SB components
-
-We thank the authors for open-sourcing their work.
-
----
-
-## License
-
-This project is currently **unlicensed**.  
-Please add a `LICENSE` file (e.g., MIT, Apache 2.0) to clarify usage.
-
-> Note: Adapted code may be subject to original licenses (BSD, NVIDIA, S-Lab, AFL 3.0).
+This architecture builds upon foundations provided by:
+- **Swin Transformers**: Liu et al.
+- **State Space Models (Mamba)**: Gu & Dao
+- **Stable Diffusion (Latent Physics)**: Rombach et al. 
+- Original Hybrid PyTorch architectures such as SupResDiffGAN/Real-ESRGAN.
 
 ---
+
+## ⚖️ License
+
+Currently Unlicensed. Please adhere to the proprietary distribution constraints of the foundational codebases utilized within (such as `diffusers`, `mamba_ssm`, and `torchvision`).

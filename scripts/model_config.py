@@ -1,76 +1,81 @@
-# In scripts/model_config.py
+"""
+Hi-MambaSR Model Selection Factory.
+Manages the initialization of different architectural variants for research benchmarks.
+"""
 
-from .model_config_imports import *
-from diffusers import AutoencoderTiny 
 import os
 import torch
-from SupResDiffGAN.modules.UNet import HybridUNet as UNet_hybrid #
-
+from .model_config_imports import *
 
 def model_selection(cfg, device):
-    """Select and initialize model based on configuration."""
-    if cfg.model.name == "SupResDiffGAN":
-        return initialize_supresdiffgan(
-            cfg, device, SupResDiffGAN, use_discriminator=True
-        )
-
-    # Logic to trigger the Swin-Mamba hybrid architecture
-    elif cfg.model.name == "SupResDiffGAN_Hybrid":
-        return initialize_supresdiffgan(
-            cfg, device, SupResDiffGAN, use_discriminator=True, use_hybrid=True
+    """
+    Select and initialize the model based on the research configuration.
+    
+    Supported models:
+    - Hi-MambaSR: The primary Hierarchical Swin-Mamba Latent Diffusion GAN.
+    - SupResDiffGAN_without_adv: Ablation variant without adversarial loss.
+    - SupResDiffGAN_simple_gan: Legacy variant for baseline comparison.
+    """
+    if cfg.model.name == "Hi-MambaSR":
+        # The primary architecture for the paper
+        return initialize_model(
+            cfg, device, HiMambaSR, use_discriminator=True
         )
 
     elif cfg.model.name == "SupResDiffGAN_without_adv":
-        return initialize_supresdiffgan(
+        return initialize_model(
             cfg, device, SupResDiffGAN_without_adv, use_discriminator=False
         )
 
     elif cfg.model.name == "SupResDiffGAN_simple_gan":
-        return initialize_supresdiffgan(
+        return initialize_model(
             cfg, device, SupResDiffGAN_simple_gan, use_discriminator=True
         )
 
     else:
         raise ValueError(
-            f"Model '{cfg.model.name}' not found. "
-            f"Supported models: SupResDiffGAN, SupResDiffGAN_Hybrid, SupResDiffGAN_without_adv, SupResDiffGAN_simple_gan"
+            f"Model '{cfg.model.name}' not identified. "
+            f"Supported research models: Hi-MambaSR, SupResDiffGAN_without_adv, SupResDiffGAN_simple_gan"
         )
 
 
-def initialize_supresdiffgan(cfg, device, model_class, use_discriminator=True, use_hybrid=False):
-    """Helper to initialize variants including the hybrid architecture."""
-    if cfg.autoencoder == "VAE":
-        # Use AutoencoderTiny for lower memory consumption
-        model_id = "madebyollin/taesd"
-        autoencoder = AutoencoderTiny.from_pretrained(model_id).to(device)
+def initialize_model(cfg, device, model_class, use_discriminator=True):
+    """
+    Helper to initialize components and assemble the final LightningModule.
+    """
+    
+    # 1. Initialize the Latent Projector (VAE/TinyVAE)
+    autoencoder = get_vae(cfg.autoencoder, device)
 
+    # 2. Initialize the Adversarial Critic
     discriminator = (
-        Discriminator_supresdiffgan(
+        Discriminator_engine(
             in_channels=cfg.discriminator.in_channels,
             channels=cfg.discriminator.channels,
         ) if use_discriminator else None
     )
 
-    # Select between the new Hybrid UNet or the standard UNet_supresdiffgan
-    if use_hybrid:
-        unet = UNet_hybrid(channels=cfg.unet)
-    else:
-        unet = UNet_supresdiffgan(cfg.unet)
+    # 3. Initialize the Denoising Backbone (Hybrid Swin-Mamba UNet)
+    unet = HybridUNet_backbone(cfg.unet)
 
-    diffusion = Diffusion_supresdiffgan(
+    # 4. Initialize the Diffusion Schedule
+    diffusion = Diffusion_engine(
         timesteps=cfg.diffusion.timesteps,
         beta_type=cfg.diffusion.beta_type,
         posterior_type=cfg.diffusion.posterior_type,
     )
 
-    # Initialize loss modules based on perceptual loss flags
+    # 5. Initialize Perceptual Loss Modules
     vgg_loss = None
     if cfg.use_perceptual_loss:
         if cfg.feature_extractor:
-            vgg_loss = FeatureExtractor_supresdiffgan(device)
+            # Multi-scale feature matching
+            vgg_loss = FeatureExtractor_engine()
         else:
-            vgg_loss = VGGLoss_supresdiffgan(device)
+            # Standard single-layer VGG loss
+            vgg_loss = VGGLoss_engine()
 
+    # 6. Assemble the LightningModule
     model = model_class(
         ae=autoencoder,
         discriminator=discriminator,
@@ -82,17 +87,25 @@ def initialize_supresdiffgan(cfg, device, model_class, use_discriminator=True, u
         vgg_loss=vgg_loss,
     )
 
-    # Checkpoint loading logic for .pth or .ckpt files
+    # 7. Loading Strategy (Supports both .pth weights and .ckpt training states)
     if cfg.model.load_model:
-        model_path = cfg.model.load_model
-        _, ext = os.path.splitext(model_path)
+        m_path = cfg.model.load_model
+        _, ext = os.path.splitext(m_path)
+        
+        print(f"Loading pre-trained state from {m_path}...")
+        
         if ext == ".pth":
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            # Direct state_dict load
+            state_dict = torch.load(m_path, map_location=device)
+            # Use strict=False because our modern architectural fixes (RMSNorm, InstanceNorm) 
+            # have different parameter keys (e.g. no bias) compared to legacy checkpoints.
+            model.load_state_dict(state_dict, strict=False)
         elif ext == ".ckpt":
-            # Load directly into the LightningModule
+            # Lightning checkpoint recovery
             model = model_class.load_from_checkpoint(
-                model_path,
+                m_path,
                 map_location=device,
+                strict=False,
                 ae=autoencoder,
                 discriminator=discriminator,
                 unet=unet,
@@ -103,6 +116,6 @@ def initialize_supresdiffgan(cfg, device, model_class, use_discriminator=True, u
                 vgg_loss=vgg_loss,
             )
         else:
-            raise ValueError(f"Unsupported file extension for loading: {ext}")
+            raise ValueError(f"Unsupported weight format: {ext}")
 
     return model
