@@ -19,3 +19,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Third-Party Notices
+===================
+
+This software uses the following open-source projects, each subject to their
+own license terms:
+
+  - PyTorch (https://github.com/pytorch/pytorch) — BSD-3-Clause
+  - PyTorch Lightning (https://github.com/Lightning-AI/pytorch-lightning) — Apache-2.0
+  - Hugging Face Diffusers (https://github.com/huggingface/diffusers) — Apache-2.0
+  - mamba-ssm (https://github.com/state-spaces/mamba) — Apache-2.0
+  - causal-conv1d (https://github.com/Dao-AILab/causal-conv1d) — BSD-3-Clause
+  - torchvision (https://github.com/pytorch/vision) — BSD-3-Clause
+  - Hydra (https://github.com/facebookresearch/hydra) — MIT
+  - Weights & Biases (https://github.com/wandb/wandb) — MIT
+  - scikit-image (https://github.com/scikit-image/scikit-image) — BSD-3-Clause
+  - OpenCV (https://github.com/opencv/opencv) — Apache-2.0
+
+Users of this software are responsible for complying with the license terms of
+all third-party dependencies listed above.

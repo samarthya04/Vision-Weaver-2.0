@@ -1,155 +1,326 @@
-# Hi-MambaSR: Hierarchical State-Space Refinement for Latent Diffusion
+# Hi-MambaSR
+
+### Hierarchical State-Space Refinement for Latent Diffusion Super-Resolution
 
 <div align="center">
-  <p><strong>Fusing Latent Diffusion, Generative Adversarial Networks (GANs), Swin Transformers, and Mamba State-Space Models for High-Fidelity Super-Resolution on 6GB Consumer GPUs.</strong></p>
+  <p><em>A hybrid framework unifying Latent Denoising Diffusion, Relativistic GANs, Swin Transformers, and Mamba State-Space Models for high-fidelity single-image super-resolution — engineered to train end-to-end on 6 GB consumer GPUs.</em></p>
 </div>
 
 <div align="center">
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python" alt="Python"></a>
-  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c?logo=pytorch" alt="PyTorch"></a>
-  <a href="https://lightning.ai/docs/pytorch/stable/"><img src="https://img.shields.io/badge/Lightning-2.2%2B-792ee5?logo=pytorch-lightning" alt="PyTorch Lightning"></a>
-  <a href="https://hydra.cc/"><img src="https://img.shields.io/badge/Config-Hydra-89b8cd" alt="Hydra"></a>
-  <a href="https://wandb.ai/"><img src="https://img.shields.io/badge/Logged-W%26B-yellowgreen" alt="Weights & Biases"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white" alt="Python"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c?logo=pytorch&logoColor=white" alt="PyTorch"></a>
+  <a href="https://lightning.ai/docs/pytorch/stable/"><img src="https://img.shields.io/badge/Lightning-2.2%2B-792ee5?logo=pytorch-lightning&logoColor=white" alt="PyTorch Lightning"></a>
+  <a href="https://hydra.cc/"><img src="https://img.shields.io/badge/Config-Hydra_1.3-89b8cd" alt="Hydra"></a>
+  <a href="https://wandb.ai/"><img src="https://img.shields.io/badge/Tracking-W%26B-FFBE00?logo=weightsandbiases&logoColor=black" alt="Weights & Biases"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 </div>
 
-**Hi-MambaSR** is a cutting-edge super-resolution architecture that implements a hybrid approach combining **Latent Denoising Diffusion Models**, **Relativistic GANs**, **Swin Transformers**, and **Mamba State-Space Models (SSMs)**. By performing diffusion in the latent space of a pre-trained autoencoder, injecting precise localized pixel-attention via Swin Transformers, and providing linear-time global context via Mamba blocks, the model achieves unprecedented perceptual quality and structural realism.
+---
 
-Crucially, this entire framework has been heavily mathematically and structurally optimized to run end-to-end training and inference on **6GB VRAM Consumer GPUs**.
+## Overview
+
+**Hi-MambaSR** proposes a multi-paradigm generator that operates entirely in the latent space of a pre-trained variational autoencoder. The denoising backbone is a `UNet2DModel` whose deepest encoder stage, mid-block, and deepest decoder stage are augmented with:
+
+| Injection Point | Module | Role |
+|---|---|---|
+| Deepest encoder block | **SwinBlock** (Flash-Attention, windowed shifted self-attention) | Captures precise local high-frequency textures |
+| Mid-block | **HiMambaBottleneck** (bi-directional Mamba SSM + depth-wise conv spatial gate) | Provides linear-complexity global structural coherence |
+| Deepest decoder block | **SwinBlock** | Reconstructs fine detail from skip connections |
+
+A **Relativistic Patch-GAN discriminator** with Spectral Normalisation and Instance Normalisation drives adversarial training, while a multi-scale **VGG-19 perceptual loss** (with gradient checkpointing) and a **Sobel edge-aware loss** guide the generator toward natural image manifolds.
+
+A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses autoencoder blurring, and a 20-step **DDIM fast-sampling** trajectory replaces the full 1000-step DDPM chain at inference time.
+
+<div align="center">
+  <img src="figures/himambasr_architecture.png" width="85%" alt="Hi-MambaSR Architecture">
+  <p><em>Figure 1 — End-to-end Hi-MambaSR pipeline: LR → Latent Encoding → Hybrid UNet Denoising → Latent Decoding + Pixel Residual → SR output.</em></p>
+</div>
 
 ---
 
-## 🌟 Key Research Features & Innovations
+## Key Contributions
 
-- **6GB VRAM Hardened Pipeline**: 
-  - Reduced physical batch sizes (4) synthesized with high gradient accumulation (16) to fit massive architectures on small GPUs without unstable math.
-  - Generative PyTorch gradient checkpointing injected into colossal VGG feature extraction layers to prevent Out-Of-Memory (OOM) crashes during hierarchical perceptual loss calculations.
-- **Mamba State-Space Stability Engine**: 
-  - Substituted native `LayerNorm` with custom **RMSNorm** to stabilize Mamba mixed-precision variables.
-  - Implemented strict 1.0 Global Gradient Norm Clipping and a Linear Learning Rate Warmup scheduler (10% epoch phase) to prevent state-matrix exploding gradients.
-- **Pixel-Space Residual Skip**: Bypass the Autoencoder (VAE) blurring bottleneck entirely via bicubic upsampling + rendering VAE decodings as pure high-frequency residuals.
-- **Small-Batch GAN Physics**: Replaced `BatchNorm` with `InstanceNorm` to prevent batch statistics from collapsing during 4-image micro-batch processing, stabilized by default Spectral Normalization.
-- **Dynamic Fast-Sampling Math**: Corrected continuous 1000-step DDPM to 20-step DDIM subsampling to guarantee the neural network interpolates over valid `alpha_bar` trajectories.
+1. **6 GB VRAM-Hardened Training Pipeline**
+   - Micro-batch size of 2 with gradient accumulation of 32 (effective batch = 64).
+   - Gradient checkpointing in the VGG-19 feature extractor and the Mamba bottleneck to cap peak memory.
+   - Sequential micro-batch VAE decoding during validation/test to avoid OOM.
+
+2. **Stable Mamba Integration**
+   - RMSNorm replaces LayerNorm to prevent mixed-precision instability in the SSM state matrix.
+   - Linear warmup (10 % of total epochs) + global gradient clipping (norm ≤ 1.0) to suppress exploding gradients.
+
+3. **Hybrid Attention–SSM Bottleneck**
+   - Swin Transformer blocks at the deepest U-Net level for localised pixel-precise attention.
+   - Bi-directional Mamba selective scan for *O(n)* global context aggregation — fused with a learnable depth-wise convolution spatial gate.
+
+4. **Small-Batch GAN Stability**
+   - Instance Normalisation in the discriminator prevents batch-statistics collapse at batch size 2–4.
+   - Spectral Normalisation enforces Lipschitz continuity across all convolutional layers.
+
+5. **Accelerated Inference**
+   - Continuous 1000-step DDPM training schedule properly sub-sampled to a 20–50 step DDIM trajectory with correct `alpha_bar` interpolation.
+
+<div align="center">
+  <img src="figures/himamba_bottleneck_detail.png" width="70%" alt="HiMamba Bottleneck Detail">
+  <p><em>Figure 2 — HiMambaBottleneck: RMSNorm → Bi-directional SSM ⊕ Sigmoid-gated DWConv → Learnable residual scale.</em></p>
+</div>
 
 ---
 
-## 📊 Evaluation & Benchmarking
+## Project Structure
 
-The architecture leverages automated testing pipelines that scrub PyTorch Lightning logs, generate CSV analytics, and natively port qualitative results (such as inference speed vs. PSNR charts) directly into Weights & Biases dashboards.
-
-> Example benchmarks will be populated in `evaluation_results/hi_mambasr_benchmarks.csv` after executing the testing suite.
-
----
-
-## ⚙️ Getting Started
-
-### Prerequisites
-- **Python**: `3.9+` (tested on `3.10`)
-- **PyTorch 2.0+** (Required for `torch.compile` speed enhancements)
-- **NVIDIA GPU** (Minimum 6GB VRAM)
-
-### Installation
-```bash
-# 1. Clone the repository
-git clone https://github.com/samarthya04/Hi-MambaSR.git
-cd Hi-MambaSR
-
-# 2. Create and activate conda environment
-conda create -n mamba_sr python=3.10
-conda activate mamba_sr
-
-# 3. Install dependencies
-pip install -r requirements-data.txt
-pip install -r requirements-gpu.txt
-
-# 4. Login to Weights & Biases
-wandb login
+```
+Hi-MambaSR/
+├── Hi-MambaSR/                     # Core model package
+│   ├── HiMambaSR.py                # PyTorch Lightning module (training, validation, test loops)
+│   └── modules/
+│       ├── UNet.py                 # HybridUNet, SwinBlock, MultiHeadSelectiveScan, HiMambaBottleneck
+│       ├── Diffusion.py            # DDPM/DDIM noise schedules & sampling loops
+│       ├── Discriminator.py        # Relativistic PatchGAN + ResNet50 discriminator (ablation)
+│       ├── FeatureExtractor.py     # Multi-scale VGG-19 perceptual loss
+│       └── VggLoss.py              # Single-scale Conv4_4 VGG loss (alternative)
+├── scripts/
+│   ├── data_loader.py              # CelebA-HQ / DIV2K data pipeline
+│   ├── model_config.py             # Model & component construction from Hydra config
+│   └── utilis.py                   # Path & naming utilities
+├── conf/
+│   └── config_mamba.yaml           # Default 6 GB-optimised Hydra configuration
+├── train_model.py                  # Training entry point
+├── evaluate_model.py               # Multi-step evaluation suite
+├── generate_figures.py             # Publication figure generation
+├── get_data.sh                     # Automated dataset download & LR generation
+├── requirements-gpu.txt            # GPU training dependencies
+├── requirements-data.txt           # Data-processing dependencies
+├── CONFIGS.md                      # Configuration parameter reference
+└── LICENSE
 ```
 
 ---
 
-## 💿 Datasets
+## Getting Started
 
-This project uses **CelebA-HQ** by default. To automate the download and processing:
+### Prerequisites
+
+| Requirement | Version |
+|---|---|
+| Python | ≥ 3.9 (tested on 3.10) |
+| PyTorch | ≥ 2.0 (`torch.compile`, Flash Attention) |
+| CUDA | ≥ 11.8 (required by `mamba-ssm`) |
+| GPU VRAM | ≥ 6 GB |
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/samarthya04/Hi-MambaSR.git
+cd Hi-MambaSR
+
+# Create a conda environment
+conda create -n himamba python=3.10 -y
+conda activate himamba
+
+# Install data-processing dependencies
+pip install -r requirements-data.txt
+
+# Install GPU/training dependencies (installs PyTorch, Lightning, Mamba, etc.)
+pip install -r requirements-gpu.txt
+
+# Authenticate with Weights & Biases
+wandb login
+```
+
+### Dataset Preparation
+
+Hi-MambaSR uses **CelebA-HQ** by default. The provided script handles downloading, splitting, and 4× bicubic down-sampling:
 
 ```bash
 bash get_data.sh -c
 ```
 
-This script will:
-1. Interface with Kaggle to download the HQ datasets.
-2. Unzip and properly split into `train`/`val`/`test` subdirectories.
-3. Automatically generate the target 4x Bicubic down-sampled **LR images**.
+The script will:
+1. Download the HQ dataset via the Kaggle API.
+2. Organise images into `data/{train,val,test}/` splits.
+3. Generate the corresponding 4× down-sampled LR images.
+
+> **Note:** Ensure the Kaggle CLI is configured (`~/.kaggle/kaggle.json`) before running.
 
 ---
 
-## 🚀 Usage
+## Usage
 
-### Training / Fine-tuning
+### Training
 
-The architecture leverages Hydra for extreme declarative configuration management. The default 6GB VRAM-optimized YAML is `config_mamba`.
+All hyper-parameters are managed declaratively through [Hydra](https://hydra.cc/). The default configuration targets 6 GB VRAM GPUs:
 
 ```bash
 python train_model.py -cn config_mamba
 ```
 
-#### To **resume** training or **fine-tune**:
-1. Open `conf/config_mamba.yaml`:
-   ```yaml
-   mode: 'train'
-   trainer:
-     resume_from_checkpoint: "models/checkpoints/Hi-MambaSR-best.ckpt"
-   ```
-2. Adjust `model.lr` (e.g., lower it to `1e-5` for advanced fine-tuning).
-3. Execute the script. The system automatically supports resuming from older ablation targets (via `strict=False` loading).
+Key default settings (see [`conf/config_mamba.yaml`](conf/config_mamba.yaml)):
 
----
+| Parameter | Value | Rationale |
+|---|---|---|
+| `dataset.batch_size` | 2 | Fits within 6 GB VRAM |
+| `trainer.accumulate_grad_batches` | 32 | Effective batch size = 64 |
+| `trainer.precision` | `bf16-mixed` | Reduces memory; stable with RMSNorm |
+| `trainer.gradient_clip_val` | 1.0 | Prevents Mamba state-matrix divergence |
+| `diffusion.beta_type` | `cosine` | Smoother noise schedule for latent diffusion |
+| `checkpoint.monitor` | `val/LPIPS` | Optimises for perceptual fidelity |
 
-### Inference & Benchmarking
+#### Resuming / Fine-Tuning
+
+```yaml
+# conf/config_mamba.yaml
+trainer:
+  resume_from_checkpoint: "models/checkpoints/Hi-MambaSR-best.ckpt"
+model:
+  lr: 1e-5   # Lower LR for fine-tuning
+```
+
+```bash
+python train_model.py -cn config_mamba
+```
+
+### Evaluation
 
 ```bash
 python evaluate_model.py -cn config_mamba
 ```
 
-#### Before running:
-1. Open `conf/config_mamba.yaml` and configure the multi-step testing suite:
-   ```yaml
-   model:
-     load_model: "models/checkpoints/<your_best_checkpoint>.ckpt"
-   evaluation:
-     steps: [25, 50]    # Will evaluate at both step configurations
-     posteriors: ["ddim", "ddpm"] 
-     results_file: "evaluation_results/hi_mambasr_benchmarks.csv"
-   ```
+Before running, set the model path and evaluation sweep in `conf/config_mamba.yaml`:
+
+```yaml
+model:
+  load_model: "models/checkpoints/<your_best_checkpoint>.ckpt"
+evaluation:
+  mode: 'all'                          # 'all' | 'steps' | 'posterior'
+  steps: [25, 50]                      # Timestep configurations to sweep
+  posteriors: ['ddim']                 # Posterior types to sweep
+  results_file: 'evaluation_results/hi_mambasr_benchmarks.csv'
+```
+
+The evaluation suite will:
+- Run inference across every `(posterior, steps)` combination.
+- Export metrics (PSNR, SSIM, LPIPS) to a CSV file.
+- Log comparative bar-charts to Weights & Biases.
+
+### Publication Figures
+
+```bash
+python generate_figures.py
+```
+
+Generates architecture diagrams, bottleneck schematics, and VRAM comparison charts to `figures/`.
 
 ---
 
-## 🏗️ Architecture Stack
+## Architecture Details
 
-| Component | Description |
-|-----------|-------------|
-| **Autoencoder** | `AutoencoderTiny`/`AutoencoderKL` projecting RGB into a compressed manifold, augmented with a pixel-space residual connection. |
-| **U-Net Generator** | Hybrid UNet mixing localized **Swin Transformer V2 Attention Arrays** (for high-frequency texture precision) with global linear-time **MultiHead Selective Scan (Mamba)** bottlenecks (for wide-range structural coherence). |
-| **Discriminator** | Relativistic Patch-GAN running `InstanceNorm` + `SpectralNorm` driven by `BCEWithLogitsLoss`. |
-| **Perceptual Loss** | Memory checkpointing Multi-scale VGG19 feature extraction (forced to fp32 calculation to prevent NaNs). |
+### Generator — `HybridUNet`
 
-See:
-- `Hi-MambaSR/HiMambaSR.py`
-- `Hi-MambaSR/modules/UNet.py`
-- `Hi-MambaSR/modules/Discriminator.py`
-- `Hi-MambaSR/modules/Diffusion.py`
+```
+Input: [x_t ∣ z_lr] ∈ ℝ^{B×8×H×W}         (noisy latent ∥ LR latent)
+  │
+  ├─ Encoder (UNet2DModel down_blocks)
+  │     └── Deepest block wrapped with SwinBlock (Flash-Attention, window 8, shift 4)
+  │
+  ├─ Mid-Block → HiMambaBottleneck
+  │     ├── RMSNorm
+  │     ├── Bi-directional Mamba SSM (d_state=32, d_conv=4)
+  │     ├── Sigmoid-gated DWConv spatial branch
+  │     └── Learnable residual scale (initialised to 0)
+  │
+  └─ Decoder (UNet2DModel up_blocks)
+        └── Deepest block wrapped with SwinBlock
+        
+Output: ε̂ ∈ ℝ^{B×4×H×W}                   (predicted noise)
+```
+
+### Discriminator — `Discriminator`
+
+- **Type:** Relativistic PatchGAN (`BCEWithLogitsLoss`)
+- **Input:** Concatenated `[SR ∣ LR]` or `[HR ∣ LR]` (6 channels)
+- **Normalisation:** InstanceNorm2d (affine) + SpectralNorm on all convolutions
+- **Channels:** `[64, 128, 256]` → AdaptiveAvgPool → `1×1` logit
+
+### Loss Function
+
+```
+L_total = L_pixel  +  α_p · L_perceptual  +  α_a · L_adversarial  +  L_edge
+
+L_pixel       = L1(SR, HR)
+L_perceptual  = Σ_k w_k · L1(VGG_k(SR), VGG_k(HR))       (k ∈ {conv1_2 … conv5_4})
+L_adversarial = BCE(D(SR|LR) − 𝔼[D(HR|LR)], 1)           (Relativistic average)
+L_edge        = L1(Sobel(SR), Sobel(HR))
+```
+
+### Diffusion Engine
+
+| Property | Training | Inference |
+|---|---|---|
+| Schedule | Cosine β, 1000 steps | Sub-sampled from training schedule |
+| Posterior | DDPM (stochastic) | DDIM (deterministic, 20–50 steps) |
+| Latent space | AutoencoderKL / AutoencoderTiny | Same encoder; micro-batch decoder |
 
 ---
 
-## 📜 Acknowledgements
+## Metrics
 
-This architecture builds upon foundations provided by:
-- **Swin Transformers**: Liu et al.
-- **State Space Models (Mamba)**: Gu & Dao
-- **Stable Diffusion (Latent Physics)**: Rombach et al. 
-- Original Hybrid PyTorch architectures such as SupResDiffGAN/Real-ESRGAN.
+The framework evaluates on the **Y channel** (YCbCr) following standard SR conventions:
+
+| Metric | Description | Target |
+|---|---|---|
+| **PSNR** | Peak Signal-to-Noise Ratio (dB) | ↑ Higher is better |
+| **SSIM** | Structural Similarity Index | ↑ Higher is better |
+| **LPIPS** | Learned Perceptual Image Patch Similarity | ↓ Lower is better |
+
+Self-ensemble (8-fold geometric TTA) is supported at test time for an additional ~0.1–0.3 dB PSNR gain.
 
 ---
 
-## ⚖️ License
+## Configuration Reference
 
-Currently Unlicensed. Please adhere to the proprietary distribution constraints of the foundational codebases utilized within (such as `diffusers`, `mamba_ssm`, and `torchvision`).
+See [`CONFIGS.md`](CONFIGS.md) for a complete parameter-by-parameter reference of all Hydra configuration options.
+
+---
+
+## Reproducibility
+
+- Global random seed is fixed at `42` via `seed_everything(42, workers=True)`.
+- `torch.set_float32_matmul_precision('medium')` is enabled for Ampere+ GPU acceleration.
+- `deterministic=False` is used because `deterministic=True` is incompatible with Flash Attention and Mamba CUDA kernels.
+
+---
+
+## Acknowledgements
+
+This work builds upon foundational research from:
+
+- **Mamba: Linear-Time Sequence Modelling with Selective State Spaces** — Gu & Dao, 2023
+- **Swin Transformer: Hierarchical Vision Transformer using Shifted Windows** — Liu et al., 2021
+- **High-Resolution Image Synthesis with Latent Diffusion Models** — Rombach et al., 2022
+- **Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data** — Wang et al., 2021
+- **Improved Denoising Diffusion Probabilistic Models** — Nichol & Dhariwal, 2021
+
+We also acknowledge the open-source ecosystems of [🤗 Diffusers](https://github.com/huggingface/diffusers), [PyTorch Lightning](https://github.com/Lightning-AI/pytorch-lightning), and [mamba-ssm](https://github.com/state-spaces/mamba).
+
+---
+
+## License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Citation
+
+If you find Hi-MambaSR useful in your research, please consider citing:
+
+```bibtex
+@software{chattree2025himambasr,
+  author    = {Chattree, Samarthya Earnest},
+  title     = {{Hi-MambaSR}: Hierarchical State-Space Refinement for Latent Diffusion Super-Resolution},
+  year      = {2025},
+  url       = {https://github.com/samarthya04/Hi-MambaSR}
+}
+```
