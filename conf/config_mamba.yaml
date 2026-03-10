@@ -1,6 +1,7 @@
 # ==============================================================================
 # Hi-MambaSR: Hierarchical State-Space Refinement for Latent Diffusion SR
-# Optimized Configuration | Target: LPIPS < 0.190
+# Fine-Tune Configuration | Pushing for LPIPS < 0.190
+# Resuming from best perceptual checkpoint (epoch 14, LPIPS=0.2639)
 # ==============================================================================
 
 mode: 'train' 
@@ -8,18 +9,17 @@ use_perceptual_loss: true
 
 model:
   name: 'Hi-MambaSR'
-  lr: 5e-5                    # Slightly higher to compensate for AdamW + L1 dynamics
-  alfa_perceptual: 0.20       # Increased: now that LPIPS/VGG gradients actually flow,
-                              # this weight directly drives perceptual fidelity
-  alfa_adv: 5e-4              # Reduced: adversarial signal is healthy now, 
-                              # lowering it prevents texture hallucinations
-  load_model: 'models/checkpoints/periodic-epoch=12-step=8000.ckpt'
+  lr: 2e-5                    # Reduced for stable fine-tuning (was 5e-5)
+  alfa_perceptual: 0.35       # Increased to drive LPIPS down harder (was 0.20)
+                              # Higher weight = more emphasis on perceptual quality
+  alfa_adv: 5e-4              # Keep low to prevent texture hallucinations
+  load_model: 'models/checkpoints/last-v1.ckpt'
 
 trainer:
-  max_epochs: 30             # Extended for proper convergence with corrected losses
+  max_epochs: 50             # Extended for fine-tuning convergence
   max_steps: -1
-  check_val_every_n_epoch: 5  
-  limit_val_batches: 0.15     # Slightly more validation for reliable LPIPS tracking
+  check_val_every_n_epoch: 3  # More frequent validation for metric tracking (was 5)
+  limit_val_batches: 0.25     # 25% of val set for reliable PSNR/SSIM/LPIPS tracking
   log_every_n_steps: 10 
   precision: 'bf16-mixed'       
   accumulate_grad_batches: 16   # Effective batch = 2 × 16 = 32
@@ -28,7 +28,7 @@ trainer:
   devices: 1
   benchmark: true
   optimizer_8bit: true           # 8-bit Adam via bitsandbytes: ~75% optimizer state memory savings
-  resume_from_checkpoint: 'models/checkpoints/periodic-epoch=12-step=8000.ckpt'        
+  resume_from_checkpoint: 'models/checkpoints/last-v1.ckpt'        
 
 dataset:
   name: 'celeb'               
@@ -64,7 +64,7 @@ diffusion:
   timesteps: 500              
   beta_type: 'cosine'          
   posterior_type: 'ddpm' 
-  validation_timesteps: 25     
+  validation_timesteps: 50     # Increased from 25 for better inference quality
   validation_posterior_type: 'ddim'
 
 discriminator:

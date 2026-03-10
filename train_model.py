@@ -137,14 +137,25 @@ def main(cfg) -> None:
     model = model_selection(cfg=cfg, device=device)
     train_loader, val_loader, test_loader = train_val_test_loader(cfg=cfg)
 
-    # Configure Checkpointing for Perceptual Fidelity (LPIPS)
-    checkpoint_callback = ModelCheckpoint(
-        monitor=cfg.checkpoint.monitor,  # Targeted: val/LPIPS
+    # Configure Checkpointing for Perceptual Fidelity (LPIPS — lower is better)
+    checkpoint_lpips = ModelCheckpoint(
+        monitor='val/LPIPS',
         dirpath=cfg.checkpoint.dirpath,
-        filename=f"Hi-MambaSR-{{epoch:02d}}-{{val/LPIPS:.4f}}",
+        filename="Hi-MambaSR-{epoch:02d}-{val/LPIPS:.4f}",
         save_top_k=cfg.checkpoint.save_top_k,
-        mode=cfg.checkpoint.mode,
+        mode='min',
         save_last=True
+    )
+
+    # Secondary checkpoint: Distortion Fidelity (PSNR — higher is better)
+    # Useful for paper ablations: best perceptual vs best distortion checkpoint.
+    checkpoint_psnr = ModelCheckpoint(
+        monitor='val/PSNR',
+        dirpath=cfg.checkpoint.dirpath,
+        filename="Hi-MambaSR-PSNR-{epoch:02d}-{val/PSNR:.2f}",
+        save_top_k=2,
+        mode='max',
+        save_last=False,  # Only LPIPS callback manages last.ckpt
     )
 
     # Periodic checkpoint: saves every N steps INDEPENDENTLY of validation.
@@ -166,7 +177,7 @@ def main(cfg) -> None:
         max_steps=cfg.trainer.max_steps,
         accelerator=cfg.trainer.accelerator,
         devices=cfg.trainer.devices,
-        callbacks=[checkpoint_callback, periodic_checkpoint, lr_monitor],
+        callbacks=[checkpoint_lpips, checkpoint_psnr, periodic_checkpoint, lr_monitor],
         logger=logger,
         check_val_every_n_epoch=cfg.trainer.check_val_every_n_epoch,
         limit_val_batches=cfg.trainer.limit_val_batches,
@@ -183,9 +194,9 @@ def main(cfg) -> None:
         trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
         
         # Phase 2: Post-Train State Recovery
-        best_ckpt_path = checkpoint_callback.best_model_path
+        best_ckpt_path = checkpoint_lpips.best_model_path
         if not best_ckpt_path:
-            best_ckpt_path = checkpoint_callback.last_model_path
+            best_ckpt_path = checkpoint_lpips.last_model_path
 
         if best_ckpt_path:
             try:

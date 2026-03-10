@@ -6,7 +6,11 @@ import torch.nn.functional as F
 import copy
 import wandb
 import time
-from matplotlib import pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server/training environments
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import Rectangle
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
@@ -131,10 +135,10 @@ class HiMambaSR(pl.LightningModule):
             posterior = self.ae.encode(x).latent_dist
             x_lat = posterior.mode() * self.ae.config.scaling_factor
         
-        # Use DDIM with fewer timesteps for faster, higher quality inference
+        # Use DDIM with more timesteps for higher quality inference
         orig_timesteps = self.diffusion.timesteps
         orig_posterior = self.diffusion.posterior_type
-        self.diffusion.set_timesteps(25)
+        self.diffusion.set_timesteps(50)
         self.diffusion.set_posterior_type('ddim')
         
         x_gen = self.diffusion.sample(gen, x_lat, x_lat.shape)
@@ -401,10 +405,29 @@ class HiMambaSR(pl.LightningModule):
         val_ssim = float(np.mean(ssim_vals))
         val_lpips = self.lpips(self.normalize_for_lpips(hr_img), self.normalize_for_lpips(sr_img)).cpu().item()
         
+        # Per-image metrics for all samples in the batch
+        per_image_psnr, per_image_ssim, per_image_lpips = [], [], []
+        for i in range(hr_np.shape[0]):
+            hr_y_i = self._rgb_to_ycbcr_y(hr_np[i])
+            sr_y_i = self._rgb_to_ycbcr_y(sr_np[i])
+            if border > 0:
+                hr_y_i = hr_y_i[border:-border, border:-border]
+                sr_y_i = sr_y_i[border:-border, border:-border]
+            per_image_psnr.append(peak_signal_noise_ratio(hr_y_i, sr_y_i, data_range=1.0))
+            per_image_ssim.append(structural_similarity(hr_y_i, sr_y_i, data_range=1.0))
+            # Per-image LPIPS
+            lp_i = self.lpips(
+                self.normalize_for_lpips(hr_img[i:i+1]),
+                self.normalize_for_lpips(sr_img[i:i+1])
+            ).cpu().item()
+            per_image_lpips.append(lp_i)
+        
         if batch_idx == 0:
-            per_metrics = [(val_psnr, val_ssim, val_lpips)]
-            img_grid = self.plot_images_with_metrics(hr_img.float(), lr_img.float(), sr_img.float(), padding_info, 
-                                                   f"Hi-MambaSR | Epoch {self.current_epoch}", per_metrics)
+            per_metrics = list(zip(per_image_psnr, per_image_ssim, per_image_lpips))
+            img_grid = self.plot_images_with_metrics(
+                hr_img.float(), lr_img.float(), sr_img.float(), padding_info,
+                f"Hi-MambaSR | Epoch {self.current_epoch}", per_metrics
+            )
             try:
                 self.logger.experiment.log({"val_samples": wandb.Image(img_grid)})
             except (BrokenPipeError, ConnectionError, OSError):
@@ -417,71 +440,204 @@ class HiMambaSR(pl.LightningModule):
         }, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=hr_img.shape[0])
 
     def plot_images_with_metrics(self, hr_img, lr_img, sr_img, padding_info, title, per_image_metrics) -> np.ndarray:
-        num_samples = min(2, hr_img.shape[0])
-        # Layout: num_samples columns for images + 1 column for metrics panel
-        fig, axs = plt.subplots(3, num_samples + 1, figsize=(4 * (num_samples + 1), 12), dpi=120,
-                                gridspec_kw={'width_ratios': [1] * num_samples + [0.8]})
-        fig.patch.set_facecolor("#121212")
-        fig.suptitle(title, fontsize=16, color="white", fontweight="bold", y=0.98)
-
-        # --- Image columns ---
-        row_labels = ["Ground Truth", "Bicubic Input", "Hi-MambaSR Prediction"]
+        """
+        Paper-ready validation visualization with white background, high DPI,
+        professional academic color scheme, and zoomed-in crop patches for
+        detail comparison.
+        """
+        num_samples = min(4, hr_img.shape[0])
+        
+        # --- Academic color palette ---
+        COLOR_TEXT = '#1a1a2e'        # Near-black for text
+        COLOR_TITLE = '#0f3460'       # Deep navy for title
+        COLOR_PSNR = '#2196F3'        # Material blue
+        COLOR_SSIM = '#4CAF50'        # Material green
+        COLOR_LPIPS = '#E64A19'       # Deep orange
+        COLOR_BORDER = '#b0bec5'      # Subtle grey for borders
+        COLOR_CROP_BOX = '#E64A19'    # Orange for crop region highlight
+        COLOR_BG_METRIC = '#f5f5f5'   # Very light grey for metric cards
+        
+        # Layout: 4 rows (GT, Bicubic, SR, Zoomed Crop) × (num_samples + 1 metrics column)
+        fig = plt.figure(figsize=(4.5 * num_samples + 3.5, 18), dpi=300)
+        fig.patch.set_facecolor('white')
+        
+        # Use gridspec for precise layout control
+        gs = gridspec.GridSpec(4, num_samples + 1, figure=fig,
+                               width_ratios=[1] * num_samples + [0.9],
+                               height_ratios=[1, 1, 1, 1],
+                               hspace=0.25, wspace=0.12)
+        
+        fig.suptitle(title, fontsize=18, color=COLOR_TITLE, fontweight='bold',
+                     y=0.97, fontfamily='serif')
+        
+        row_labels = ["Ground Truth (HR)", "Bicubic Input (LR↑)", "Hi-MambaSR (SR)", "Detail Crop (64×64)"]
+        
+        # Crop region: center 64×64 patch for detail comparison
+        crop_size = 64
+        
         for i in range(num_samples):
-            img_sets = [(hr_img[i], row_labels[0], axs[0, i]),
-                        (lr_img[i], row_labels[1], axs[1, i]),
-                        (sr_img[i], row_labels[2], axs[2, i])]
-            for img_t, lbl, ax in img_sets:
-                img_np = np.clip((img_t.detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
-                ax.imshow(img_np)
-                ax.set_title(lbl, fontsize=11, color="white", pad=6)
-                ax.axis('off')
-
-        # --- Metrics panel (right column) ---
+            hr_np = np.clip((hr_img[i].detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+            lr_np_raw = np.clip((lr_img[i].detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+            sr_np = np.clip((sr_img[i].detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+            
+            # Bicubic upsample LR for display at HR resolution
+            from PIL import Image as PILImage
+            lr_pil = PILImage.fromarray((lr_np_raw * 255).astype(np.uint8))
+            lr_up_pil = lr_pil.resize((hr_np.shape[1], hr_np.shape[0]), PILImage.BICUBIC)
+            lr_np = np.array(lr_up_pil).astype(np.float32) / 255.0
+            
+            # Determine crop region (center of image)
+            h, w = hr_np.shape[:2]
+            cy, cx = h // 2, w // 2
+            y1 = max(0, cy - crop_size // 2)
+            x1 = max(0, cx - crop_size // 2)
+            y2 = min(h, y1 + crop_size)
+            x2 = min(w, x1 + crop_size)
+            
+            img_sets = [
+                (hr_np, row_labels[0], 0),
+                (lr_np, row_labels[1], 1),
+                (sr_np, row_labels[2], 2),
+            ]
+            
+            for img_np, lbl, row_idx in img_sets:
+                ax = fig.add_subplot(gs[row_idx, i])
+                ax.imshow(img_np, interpolation='lanczos')
+                
+                # Draw crop region rectangle on the main images
+                rect = Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                 linewidth=1.5, edgecolor=COLOR_CROP_BOX,
+                                 facecolor='none', linestyle='--')
+                ax.add_patch(rect)
+                
+                if i == 0:
+                    ax.set_ylabel(lbl, fontsize=10, color=COLOR_TEXT, fontweight='semibold',
+                                  fontfamily='serif', labelpad=8)
+                if row_idx == 0:
+                    ax.set_title(f"Sample {i+1}", fontsize=10, color=COLOR_TEXT,
+                                 fontweight='semibold', fontfamily='serif', pad=8)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_color(COLOR_BORDER)
+                    spine.set_linewidth(0.5)
+            
+            # --- Row 4: Zoomed crop patches (GT vs SR side-by-side) ---
+            ax_crop = fig.add_subplot(gs[3, i])
+            hr_crop = hr_np[y1:y2, x1:x2]
+            sr_crop = sr_np[y1:y2, x1:x2]
+            
+            # Side-by-side: GT | SR with a thin divider
+            divider_width = 2
+            combined = np.ones((crop_size, crop_size * 2 + divider_width, 3), dtype=np.float32)
+            combined[:, :crop_size] = hr_crop
+            combined[:, crop_size:crop_size + divider_width] = 0.85  # Light grey divider
+            combined[:, crop_size + divider_width:] = sr_crop
+            
+            ax_crop.imshow(combined, interpolation='nearest')  # nearest to show pixel detail
+            ax_crop.set_xticks([])
+            ax_crop.set_yticks([])
+            
+            # Labels on the crop
+            ax_crop.text(crop_size * 0.5, crop_size + 4, 'GT', fontsize=7,
+                         color=COLOR_PSNR, ha='center', va='top', fontweight='bold', fontfamily='serif')
+            ax_crop.text(crop_size * 1.5 + divider_width, crop_size + 4, 'SR', fontsize=7,
+                         color=COLOR_LPIPS, ha='center', va='top', fontweight='bold', fontfamily='serif')
+            
+            if i == 0:
+                ax_crop.set_ylabel(row_labels[3], fontsize=10, color=COLOR_TEXT, fontweight='semibold',
+                                   fontfamily='serif', labelpad=8)
+            for spine in ax_crop.spines.values():
+                spine.set_color(COLOR_CROP_BOX)
+                spine.set_linewidth(1.0)
+        
+        # --- Metrics panel (rightmost column, spanning all rows) ---
+        ax_metrics = fig.add_subplot(gs[:, num_samples])
+        ax_metrics.set_facecolor(COLOR_BG_METRIC)
+        ax_metrics.set_xlim(0, 1)
+        ax_metrics.set_ylim(0, 1)
+        ax_metrics.axis('off')
+        for spine in ax_metrics.spines.values():
+            spine.set_visible(False)
+        
+        # Panel title
+        ax_metrics.text(0.5, 0.97, "Validation Metrics", fontsize=13, color=COLOR_TITLE,
+                        ha='center', va='top', fontweight='bold', fontfamily='serif',
+                        transform=ax_metrics.transAxes)
+        ax_metrics.axhline(y=0.95, xmin=0.1, xmax=0.9, color=COLOR_BORDER, linewidth=0.8)
+        
         metric_names = ["PSNR (dB)", "SSIM", "LPIPS"]
-        # Color coding: higher is better for PSNR/SSIM, lower is better for LPIPS
-        metric_colors = ["#4FC3F7", "#81C784", "#FF8A65"]
-
-        for row_idx in range(3):
-            ax = axs[row_idx, num_samples]
-            ax.set_facecolor("#1E1E1E")
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-            ax.axis('off')
-
-            if row_idx == 0:
-                # Title for metrics panel
-                ax.text(0.5, 0.92, "Validation Metrics", fontsize=12, color="#EEEEEE",
-                        ha='center', va='top', fontweight='bold',
-                        transform=ax.transAxes)
-                # Display per-sample metrics
-                for s_idx in range(min(num_samples, len(per_image_metrics))):
-                    psnr_v, ssim_v, lpips_v = per_image_metrics[s_idx]
-                    y_start = 0.72 - s_idx * 0.38
-                    ax.text(0.5, y_start, f"Sample {s_idx + 1}", fontsize=10, color="#BDBDBD",
-                            ha='center', va='top', fontstyle='italic', transform=ax.transAxes)
-                    for m_i, (m_name, m_val, m_col) in enumerate(zip(
-                            metric_names, [psnr_v, ssim_v, lpips_v], metric_colors)):
-                        y_pos = y_start - 0.08 * (m_i + 1)
-                        ax.text(0.5, y_pos, f"{m_name}: {m_val:.4f}", fontsize=11, color=m_col,
-                                ha='center', va='top', fontweight='bold',
-                                fontfamily='monospace', transform=ax.transAxes)
-            elif row_idx == 1:
-                # Arrow legend explaining metric directions
-                ax.text(0.5, 0.7, "↑ PSNR  ↑ SSIM", fontsize=10, color="#81C784",
-                        ha='center', va='center', transform=ax.transAxes)
-                ax.text(0.5, 0.45, "↓ LPIPS (lower = better)", fontsize=10, color="#FF8A65",
-                        ha='center', va='center', transform=ax.transAxes)
-            else:
-                # Epoch badge in bottom-right cell
-                ax.text(0.5, 0.5, f"Epoch {self.current_epoch}",
-                        fontsize=14, color="#FFF176", ha='center', va='center',
-                        fontweight='bold', transform=ax.transAxes,
-                        bbox=dict(boxstyle='round,pad=0.4', facecolor='#333333',
-                                  edgecolor='#FFF176', alpha=0.9))
-
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        metric_colors = [COLOR_PSNR, COLOR_SSIM, COLOR_LPIPS]
+        metric_arrows = ["↑", "↑", "↓"]
+        
+        # Per-sample metric cards
+        n_display = min(num_samples, len(per_image_metrics))
+        card_height = min(0.18, 0.80 / max(n_display, 1))
+        
+        for s_idx in range(n_display):
+            psnr_v, ssim_v, lpips_v = per_image_metrics[s_idx]
+            y_start = 0.90 - s_idx * (card_height + 0.03)
+            
+            # Sample header
+            ax_metrics.text(0.5, y_start, f"— Sample {s_idx + 1} —", fontsize=9,
+                            color=COLOR_TEXT, ha='center', va='top', fontweight='semibold',
+                            fontfamily='serif', fontstyle='italic',
+                            transform=ax_metrics.transAxes)
+            
+            for m_i, (m_name, m_val, m_col, m_arr) in enumerate(zip(
+                    metric_names, [psnr_v, ssim_v, lpips_v], metric_colors, metric_arrows)):
+                y_pos = y_start - 0.035 * (m_i + 1)
+                ax_metrics.text(0.12, y_pos, f"{m_arr}", fontsize=10, color=m_col,
+                                ha='left', va='top', fontweight='bold',
+                                transform=ax_metrics.transAxes)
+                ax_metrics.text(0.22, y_pos, f"{m_name}:", fontsize=8.5, color=COLOR_TEXT,
+                                ha='left', va='top', fontfamily='serif',
+                                transform=ax_metrics.transAxes)
+                ax_metrics.text(0.88, y_pos, f"{m_val:.4f}", fontsize=9.5, color=m_col,
+                                ha='right', va='top', fontweight='bold',
+                                fontfamily='monospace', transform=ax_metrics.transAxes)
+        
+        # Compute batch averages
+        if len(per_image_metrics) > 1:
+            avg_psnr = float(np.mean([m[0] for m in per_image_metrics[:n_display]]))
+            avg_ssim = float(np.mean([m[1] for m in per_image_metrics[:n_display]]))
+            avg_lpips = float(np.mean([m[2] for m in per_image_metrics[:n_display]]))
+            
+            y_avg = 0.90 - n_display * (card_height + 0.03) - 0.02
+            ax_metrics.axhline(y=y_avg + 0.015, xmin=0.1, xmax=0.9, color=COLOR_BORDER,
+                               linewidth=0.6)
+            ax_metrics.text(0.5, y_avg, "Batch Average", fontsize=9.5, color=COLOR_TITLE,
+                            ha='center', va='top', fontweight='bold', fontfamily='serif',
+                            transform=ax_metrics.transAxes)
+            for m_i, (m_name, m_val, m_col) in enumerate(zip(
+                    metric_names, [avg_psnr, avg_ssim, avg_lpips], metric_colors)):
+                y_pos = y_avg - 0.035 * (m_i + 1)
+                ax_metrics.text(0.22, y_pos, f"{m_name}:", fontsize=8.5, color=COLOR_TEXT,
+                                ha='left', va='top', fontfamily='serif',
+                                transform=ax_metrics.transAxes)
+                ax_metrics.text(0.88, y_pos, f"{m_val:.4f}", fontsize=9.5, color=m_col,
+                                ha='right', va='top', fontweight='bold',
+                                fontfamily='monospace', transform=ax_metrics.transAxes)
+        
+        # Legend at bottom of metrics panel
+        ax_metrics.text(0.5, 0.06, "↑ higher is better", fontsize=8, color=COLOR_SSIM,
+                        ha='center', va='center', fontfamily='serif',
+                        transform=ax_metrics.transAxes)
+        ax_metrics.text(0.5, 0.03, "↓ lower is better", fontsize=8, color=COLOR_LPIPS,
+                        ha='center', va='center', fontfamily='serif',
+                        transform=ax_metrics.transAxes)
+        
+        # Epoch badge
+        ax_metrics.text(0.5, 0.11, f"Epoch {self.current_epoch}",
+                        fontsize=11, color=COLOR_TITLE, ha='center', va='center',
+                        fontweight='bold', fontfamily='serif',
+                        transform=ax_metrics.transAxes,
+                        bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                                  edgecolor=COLOR_TITLE, linewidth=1.2))
+        
         fig.canvas.draw()
-        img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(
+            fig.canvas.get_width_height()[::-1] + (3,))
         plt.close(fig)
         return img_array
 
