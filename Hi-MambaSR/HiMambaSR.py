@@ -29,6 +29,7 @@ class HiMambaSR(pl.LightningModule):
         learning_rate: float = 1e-4,
         alfa_perceptual: float = 2e-2,
         alfa_adv: float = 5e-3,
+        alfa_color: float = 0.1,
         vgg_loss: nn.Module | None = None,
         optimizer_8bit: bool = False,
     ) -> None:
@@ -53,6 +54,7 @@ class HiMambaSR(pl.LightningModule):
         self.lr = learning_rate
         self.alfa_adv = alfa_adv
         self.alfa_perceptual = alfa_perceptual
+        self.alfa_color = alfa_color
         self.betas = (0.9, 0.999)
         self._optimizer_8bit = optimizer_8bit
 
@@ -236,6 +238,12 @@ class HiMambaSR(pl.LightningModule):
         l_lpips = self.lpips(self.normalize_for_lpips(sr_img), self.normalize_for_lpips(hr_img))
         l_edge = self.calculate_edge_loss(sr_img, hr_img)
         
+        # --- Color Fidelity Loss (Pixel-Space RGB L1) ---
+        # Directly penalizes RGB color drift that latent-space and feature-space
+        # losses miss. Y-channel metrics (PSNR/SSIM) are blind to chrominance
+        # errors — this loss anchors the model's color reproduction to GT.
+        l_color = F.l1_loss(sr_img, hr_img)
+        
         # VGG/FeatureExtractor perceptual loss (multi-scale)
         l_vgg = self.vgg_loss(sr_img, hr_img) if self.vgg_loss else 0.0
 
@@ -263,11 +271,13 @@ class HiMambaSR(pl.LightningModule):
         # l_content: latent-space L1 reconstruction (gradient ✓)
         # l_lpips: direct perceptual similarity (gradient ✓)
         # l_vgg: multi-scale VGG feature matching (gradient ✓)
+        # l_color: pixel-space RGB L1 for color fidelity (gradient ✓)
         # l_adv: adversarial realism (logged only, no gradient to generator)
         # l_edge: Sobel edge preservation (gradient ✓)
         # l_lat_reg: soft latent magnitude regularization (gradient ✓)
         g_loss = l_content \
                  + (self.hparams.alfa_perceptual * (l_lpips + l_vgg)) \
+                 + (self.alfa_color * l_color) \
                  + (0.05 * l_edge) \
                  + (5e-4 * l_lat_reg)
         
@@ -293,6 +303,7 @@ class HiMambaSR(pl.LightningModule):
             "train/g_loss": g_loss, 
             "train/l_content": l_content,
             "train/g_lpips": l_lpips,
+            "train/l_color": l_color,
             "train/l_edge": l_edge,
             "train/l_vgg": l_vgg if isinstance(l_vgg, torch.Tensor) else 0.0,
             "train/l_adv": l_adv,
@@ -379,6 +390,15 @@ class HiMambaSR(pl.LightningModule):
         """Convert RGB [0,1] numpy array (H,W,3) to Y channel. Research standard for PSNR/SSIM."""
         return 16./255. + (65.481/255. * img_np[..., 0] + 128.553/255. * img_np[..., 1] + 24.966/255. * img_np[..., 2])
 
+    @staticmethod
+    def _compute_color_diff(hr_np: np.ndarray, sr_np: np.ndarray) -> float:
+        """Compute mean per-pixel color difference (simplified ΔE in RGB space).
+        Returns the average Euclidean distance in RGB [0,1] space across all pixels.
+        Lower is better. A value < 0.02 indicates near-perfect color reproduction."""
+        diff = hr_np.astype(np.float64) - sr_np.astype(np.float64)
+        per_pixel_dist = np.sqrt(np.sum(diff ** 2, axis=-1))  # Euclidean in RGB
+        return float(np.mean(per_pixel_dist))
+
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         lr_img, hr_img = batch["lr"], batch["hr"]
         sr_img = self(lr_img)
@@ -391,6 +411,8 @@ class HiMambaSR(pl.LightningModule):
         # Y-channel metrics (research standard: crop border by scale factor)
         border = self.hparams.get('scale', 4) if hasattr(self.hparams, 'get') else 4
         psnr_vals, ssim_vals = [], []
+        psnr_rgb_vals = []  # RGB PSNR to monitor color accuracy
+        color_diff_vals = []  # Per-pixel RGB color difference (simplified ΔE)
         for i in range(hr_np.shape[0]):
             hr_y = self._rgb_to_ycbcr_y(hr_np[i])
             sr_y = self._rgb_to_ycbcr_y(sr_np[i])
@@ -400,13 +422,21 @@ class HiMambaSR(pl.LightningModule):
                 sr_y = sr_y[border:-border, border:-border]
             psnr_vals.append(peak_signal_noise_ratio(hr_y, sr_y, data_range=1.0))
             ssim_vals.append(structural_similarity(hr_y, sr_y, data_range=1.0))
+            # RGB PSNR (captures color accuracy that Y-channel PSNR misses)
+            hr_rgb_crop = hr_np[i][border:-border, border:-border] if border > 0 else hr_np[i]
+            sr_rgb_crop = sr_np[i][border:-border, border:-border] if border > 0 else sr_np[i]
+            psnr_rgb_vals.append(peak_signal_noise_ratio(hr_rgb_crop, sr_rgb_crop, data_range=1.0))
+            color_diff_vals.append(self._compute_color_diff(hr_rgb_crop, sr_rgb_crop))
         
         val_psnr = float(np.mean(psnr_vals))
         val_ssim = float(np.mean(ssim_vals))
+        val_psnr_rgb = float(np.mean(psnr_rgb_vals))
+        val_color_diff = float(np.mean(color_diff_vals))
         val_lpips = self.lpips(self.normalize_for_lpips(hr_img), self.normalize_for_lpips(sr_img)).cpu().item()
         
         # Per-image metrics for all samples in the batch
         per_image_psnr, per_image_ssim, per_image_lpips = [], [], []
+        per_image_psnr_rgb, per_image_color_diff = [], []
         for i in range(hr_np.shape[0]):
             hr_y_i = self._rgb_to_ycbcr_y(hr_np[i])
             sr_y_i = self._rgb_to_ycbcr_y(sr_np[i])
@@ -421,9 +451,17 @@ class HiMambaSR(pl.LightningModule):
                 self.normalize_for_lpips(sr_img[i:i+1])
             ).cpu().item()
             per_image_lpips.append(lp_i)
+            # Per-image RGB PSNR and color diff
+            hr_rgb_i = hr_np[i][border:-border, border:-border] if border > 0 else hr_np[i]
+            sr_rgb_i = sr_np[i][border:-border, border:-border] if border > 0 else sr_np[i]
+            per_image_psnr_rgb.append(peak_signal_noise_ratio(hr_rgb_i, sr_rgb_i, data_range=1.0))
+            per_image_color_diff.append(self._compute_color_diff(hr_rgb_i, sr_rgb_i))
         
         if batch_idx == 0:
-            per_metrics = list(zip(per_image_psnr, per_image_ssim, per_image_lpips))
+            per_metrics = list(zip(
+                per_image_psnr, per_image_ssim, per_image_lpips,
+                per_image_psnr_rgb, per_image_color_diff
+            ))
             img_grid = self.plot_images_with_metrics(
                 hr_img.float(), lr_img.float(), sr_img.float(), padding_info,
                 f"Hi-MambaSR | Epoch {self.current_epoch}", per_metrics
@@ -435,15 +473,17 @@ class HiMambaSR(pl.LightningModule):
 
         self.log_dict({
             "val/PSNR": val_psnr, 
+            "val/PSNR_RGB": val_psnr_rgb,
             "val/SSIM": val_ssim, 
-            "val/LPIPS": val_lpips
+            "val/LPIPS": val_lpips,
+            "val/ColorDiff": val_color_diff,
         }, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=hr_img.shape[0])
 
     def plot_images_with_metrics(self, hr_img, lr_img, sr_img, padding_info, title, per_image_metrics) -> np.ndarray:
         """
         Paper-ready validation visualization with white background, high DPI,
         professional academic color scheme, and zoomed-in crop patches for
-        detail comparison.
+        detail comparison. Now includes RGB PSNR and Color Diff (ΔE) metrics.
         """
         num_samples = min(4, hr_img.shape[0])
         
@@ -453,17 +493,19 @@ class HiMambaSR(pl.LightningModule):
         COLOR_PSNR = '#2196F3'        # Material blue
         COLOR_SSIM = '#4CAF50'        # Material green
         COLOR_LPIPS = '#E64A19'       # Deep orange
+        COLOR_PSNR_RGB = '#7B1FA2'    # Purple for RGB PSNR
+        COLOR_COLORDIFF = '#C62828'   # Dark red for Color Diff
         COLOR_BORDER = '#b0bec5'      # Subtle grey for borders
         COLOR_CROP_BOX = '#E64A19'    # Orange for crop region highlight
         COLOR_BG_METRIC = '#f5f5f5'   # Very light grey for metric cards
         
         # Layout: 4 rows (GT, Bicubic, SR, Zoomed Crop) × (num_samples + 1 metrics column)
-        fig = plt.figure(figsize=(4.5 * num_samples + 3.5, 18), dpi=300)
+        fig = plt.figure(figsize=(4.5 * num_samples + 4.2, 18), dpi=300)
         fig.patch.set_facecolor('white')
         
         # Use gridspec for precise layout control
         gs = gridspec.GridSpec(4, num_samples + 1, figure=fig,
-                               width_ratios=[1] * num_samples + [0.9],
+                               width_ratios=[1] * num_samples + [1.1],
                                height_ratios=[1, 1, 1, 1],
                                hspace=0.25, wspace=0.12)
         
@@ -566,17 +608,19 @@ class HiMambaSR(pl.LightningModule):
                         transform=ax_metrics.transAxes)
         ax_metrics.axhline(y=0.95, xmin=0.1, xmax=0.9, color=COLOR_BORDER, linewidth=0.8)
         
-        metric_names = ["PSNR (dB)", "SSIM", "LPIPS"]
-        metric_colors = [COLOR_PSNR, COLOR_SSIM, COLOR_LPIPS]
-        metric_arrows = ["↑", "↑", "↓"]
+        # Extended metric set: Y-PSNR, RGB-PSNR, SSIM, LPIPS, ColorDiff
+        metric_names = ["PSNR-Y (dB)", "PSNR-RGB (dB)", "SSIM", "LPIPS", "ΔColor"]
+        metric_colors = [COLOR_PSNR, COLOR_PSNR_RGB, COLOR_SSIM, COLOR_LPIPS, COLOR_COLORDIFF]
+        metric_arrows = ["↑", "↑", "↑", "↓", "↓"]
         
         # Per-sample metric cards
         n_display = min(num_samples, len(per_image_metrics))
-        card_height = min(0.18, 0.80 / max(n_display, 1))
+        card_height = min(0.22, 0.80 / max(n_display, 1))
         
         for s_idx in range(n_display):
-            psnr_v, ssim_v, lpips_v = per_image_metrics[s_idx]
-            y_start = 0.90 - s_idx * (card_height + 0.03)
+            psnr_v, ssim_v, lpips_v, psnr_rgb_v, color_diff_v = per_image_metrics[s_idx]
+            all_vals = [psnr_v, psnr_rgb_v, ssim_v, lpips_v, color_diff_v]
+            y_start = 0.90 - s_idx * (card_height + 0.02)
             
             # Sample header
             ax_metrics.text(0.5, y_start, f"— Sample {s_idx + 1} —", fontsize=9,
@@ -585,15 +629,15 @@ class HiMambaSR(pl.LightningModule):
                             transform=ax_metrics.transAxes)
             
             for m_i, (m_name, m_val, m_col, m_arr) in enumerate(zip(
-                    metric_names, [psnr_v, ssim_v, lpips_v], metric_colors, metric_arrows)):
-                y_pos = y_start - 0.035 * (m_i + 1)
-                ax_metrics.text(0.12, y_pos, f"{m_arr}", fontsize=10, color=m_col,
+                    metric_names, all_vals, metric_colors, metric_arrows)):
+                y_pos = y_start - 0.028 * (m_i + 1)
+                ax_metrics.text(0.08, y_pos, f"{m_arr}", fontsize=9, color=m_col,
                                 ha='left', va='top', fontweight='bold',
                                 transform=ax_metrics.transAxes)
-                ax_metrics.text(0.22, y_pos, f"{m_name}:", fontsize=8.5, color=COLOR_TEXT,
+                ax_metrics.text(0.17, y_pos, f"{m_name}:", fontsize=7.5, color=COLOR_TEXT,
                                 ha='left', va='top', fontfamily='serif',
                                 transform=ax_metrics.transAxes)
-                ax_metrics.text(0.88, y_pos, f"{m_val:.4f}", fontsize=9.5, color=m_col,
+                ax_metrics.text(0.92, y_pos, f"{m_val:.4f}", fontsize=8.5, color=m_col,
                                 ha='right', va='top', fontweight='bold',
                                 fontfamily='monospace', transform=ax_metrics.transAxes)
         
@@ -602,20 +646,23 @@ class HiMambaSR(pl.LightningModule):
             avg_psnr = float(np.mean([m[0] for m in per_image_metrics[:n_display]]))
             avg_ssim = float(np.mean([m[1] for m in per_image_metrics[:n_display]]))
             avg_lpips = float(np.mean([m[2] for m in per_image_metrics[:n_display]]))
+            avg_psnr_rgb = float(np.mean([m[3] for m in per_image_metrics[:n_display]]))
+            avg_color_diff = float(np.mean([m[4] for m in per_image_metrics[:n_display]]))
             
-            y_avg = 0.90 - n_display * (card_height + 0.03) - 0.02
+            y_avg = 0.90 - n_display * (card_height + 0.02) - 0.02
             ax_metrics.axhline(y=y_avg + 0.015, xmin=0.1, xmax=0.9, color=COLOR_BORDER,
                                linewidth=0.6)
             ax_metrics.text(0.5, y_avg, "Batch Average", fontsize=9.5, color=COLOR_TITLE,
                             ha='center', va='top', fontweight='bold', fontfamily='serif',
                             transform=ax_metrics.transAxes)
+            all_avg_vals = [avg_psnr, avg_psnr_rgb, avg_ssim, avg_lpips, avg_color_diff]
             for m_i, (m_name, m_val, m_col) in enumerate(zip(
-                    metric_names, [avg_psnr, avg_ssim, avg_lpips], metric_colors)):
-                y_pos = y_avg - 0.035 * (m_i + 1)
-                ax_metrics.text(0.22, y_pos, f"{m_name}:", fontsize=8.5, color=COLOR_TEXT,
+                    metric_names, all_avg_vals, metric_colors)):
+                y_pos = y_avg - 0.028 * (m_i + 1)
+                ax_metrics.text(0.17, y_pos, f"{m_name}:", fontsize=7.5, color=COLOR_TEXT,
                                 ha='left', va='top', fontfamily='serif',
                                 transform=ax_metrics.transAxes)
-                ax_metrics.text(0.88, y_pos, f"{m_val:.4f}", fontsize=9.5, color=m_col,
+                ax_metrics.text(0.92, y_pos, f"{m_val:.4f}", fontsize=8.5, color=m_col,
                                 ha='right', va='top', fontweight='bold',
                                 fontfamily='monospace', transform=ax_metrics.transAxes)
         

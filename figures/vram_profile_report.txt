@@ -1,0 +1,17 @@
+============================================================
+Hi-MambaSR VRAM & Parameter Profile
+============================================================
+
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+Total GPU Memory: 5.6 GB
+
+--- Inference (batch_size=1) ---
+Peak VRAM: 821.8 MB (0.80 GB)
+
+--- Training (batch_size=2) ---
+Peak VRAM: 744.0 MB (0.73 GB)
+
+--- Model Complexity ---
+Generator Parameters: 19.53M
+Discriminator Parameters: 1.24M
+Total Trainable: 20.77M

@@ -84,6 +84,7 @@ def initialize_model(cfg, device, model_class, use_discriminator=True):
         learning_rate=cfg.model.lr,
         alfa_perceptual=cfg.model.alfa_perceptual,
         alfa_adv=cfg.model.alfa_adv,
+        alfa_color=cfg.model.get('alfa_color', 0.1),
         vgg_loss=vgg_loss,
         optimizer_8bit=cfg.trainer.get('optimizer_8bit', False),
     )
@@ -114,6 +115,7 @@ def initialize_model(cfg, device, model_class, use_discriminator=True):
                 learning_rate=cfg.model.lr,
                 alfa_perceptual=cfg.model.alfa_perceptual,
                 alfa_adv=cfg.model.alfa_adv,
+                alfa_color=cfg.model.get('alfa_color', 0.1),
                 vgg_loss=vgg_loss,
                 optimizer_8bit=cfg.trainer.get('optimizer_8bit', False),
             )
